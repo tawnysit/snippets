@@ -8,6 +8,7 @@ import numpy as np
 from astropy.io import ascii, fits
 from astropy.table import Table
 from astropy.time import Time
+import json
 
 # Copy the API token from your Fritz account
 token = 'copied-from-fritz'
@@ -157,6 +158,109 @@ is the range you want [y/n]:\n"))
 
     return spectrum
 
+def gen_comments(spec):
+    comment_list = []
+    header = spec.meta['header']
+    exts = []
+    red_count = 0
+    blue_count = 0
+    total_exptime = []
+    data_keys_to_save = ['OBJECT', 'OBSERVER', 'DATE', 'EXPTIME', 'APERTURE', 'AIRMASS', 'RA', 'DEC', 'HA', 'TELFOCUS', 'CASSPA', 'PARALLAC', 'DICHROIC', 'GRATING']
+
+    for header_ext in header.keys():
+        if 'RED00' in header_ext:
+            total_exptime.append(header[header_ext]['EXPTIME'])
+            if red_count<1:
+                exts.append(header_ext)
+                red_count += 1
+        elif ('BLUE00' in header_ext) & (blue_count<1):
+            exts.append(header_ext)
+            blue_count += 1
+        elif (header_ext=='VERSION') | (header_ext=='SPLICED'):
+            exts.append(header_ext)
+
+    for ext in exts:
+        if ext=='VERSION':
+            for k, key in enumerate(header[ext].keys()):
+                if k>=4:
+                    comment_list.append(key + '=' + str(header[ext][key]))
+        elif ext=='SPLICED':
+            for k, key in enumerate(header[ext].keys()):
+                if k>=18:
+                    comment_list.append(key + '=' + str(header[ext][key]))
+        elif 'RED' in ext:
+            for key in data_keys_to_save:
+            #for k, key in enumerate(header[ext].keys()):
+                if key=='EXPTIME':
+                    total_exptime = np.sum(np.array(total_exptime))
+                    comment_list.append('TOTAL_EXPTIME' + '=' + str(total_exptime))
+                elif key=='GRATING':
+                    comment_list.append('RED_GRATING' + '=' + str(header[ext][key]))
+                else:
+                    comment_list.append(key + '=' + str(header[ext][key]))
+        elif 'BLUE' in ext:
+            comment_list.append('BLUE_GRATING' + '=' + str(header[ext]['GRATING']))
+    
+    return comment_list + ['COLUMNS: WAVE FLUX FLUX_ERR']
+
+def upload_spectrum_ascii(spec, observers, reducers, group_ids=[], date=None, inst_id=3, ztfid=None):
+    """
+    Upload a spectrum to the Fritz marshal
+    ----
+    Parameters
+    spec astropy table object
+        table with wavelength, flux, fluxerr
+    observers list of int
+        list of integers corresponding to observer usernames
+    reducers list of int
+        list of integers corresponding to reducer usernames
+    group_ids list of int
+        list of IDs of the groups to share the spectum with
+    date str
+         date (UT) of the spectrum
+    inst_id int
+        ID of the instrument (default DBSP)
+    ztfid str
+        ID of the ZTF source, e.g. ZTF20aclnxgz
+    """
+
+    #Get rid of NaNs in lpipe output since fritz does not like NaNs and inf
+    good_rows = ~np.isnan(spec['flux'])
+    usespec = spec[good_rows]
+    good_rows = ~np.isinf(spec['flux'])
+    usespec = spec[good_rows]
+    good_rows = ~np.isnan(spec['fluxerr'])
+    usespec = spec[good_rows]
+    good_rows = ~np.isinf(spec['fluxerr'])
+    usespec = spec[good_rows]
+    
+    fname = f'{ztfid}.ascii'
+    spec.write(fname, format='ascii.no_header', overwrite=True)
+
+    data = {
+            "observed_by": observers,
+            "group_ids": group_ids,
+            "observed_at": str(date),
+            "filename": fname,
+            "instrument_id": inst_id,
+            "reduced_by": reducers,
+            "ascii": open(fname).read(),
+            "wave_column": 0,
+            "flux_column": 1,
+            "fluxerr_column": 2,
+            "obj_id": ztfid
+            }
+    
+    response = api('POST',
+                   'https://fritz.science/api/spectra/ascii',
+                   data=data)
+
+    print(f'HTTP code: {response.status_code}, {response.reason}')
+    if response.status_code == 400:
+        print(f'JSON response: {response.json()}')
+    
+    return data
+
 
 if __name__ == "__main__":
     import argparse
@@ -291,6 +395,12 @@ the name of the source for the spectrum {source_filename}:\n")
         # Upload
         print(f"Uploading spectrum {source_filename} for source {source} \
 to group IDs {group_ids}")
-        upload_spectrum(spec, observers, reducers, group_ids=group_ids,
-                        date=Time(args.date).iso, inst_id=args.inst_id,
-                        ztfid=source, meta=meta)
+        ok_ascii = str2bool(input('Use ascii upload?\n') or 'y')
+        if ok_ascii:
+            upload_spectrum_ascii(spec, observers, reducers, group_ids=group_ids,
+                                  date=Time(args.date).iso, inst_id=args.inst_id,
+                                  ztfid=source)
+        else:
+            upload_spectrum(spec, observers, reducers, group_ids=group_ids,
+                            date=Time(args.date).iso, inst_id=args.inst_id,
+                            ztfid=source, meta=meta)
